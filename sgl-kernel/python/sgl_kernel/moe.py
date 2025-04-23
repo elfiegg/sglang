@@ -90,3 +90,27 @@ def fp8_blockwise_scaled_grouped_mm(
         problem_sizes,
         expert_offsets,
     )
+
+
+def prepare_moe_input(
+    topk_ids,
+    expert_offsets,
+    problem_sizes1,
+    problem_sizes2,
+    input_permutation,
+    output_permutation,
+    num_experts,
+    n,
+    k,
+):
+    torch.ops.sgl_kernel.prepare_moe_input.default(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        n,
+        k,
+    )
