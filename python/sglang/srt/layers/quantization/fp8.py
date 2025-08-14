@@ -48,6 +48,7 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     scaled_fp8_quant,
 )
 from sglang.srt.layers.quantization.fp8_utils import (
+    Fp8BufferPool,
     apply_fp8_linear,
     cutlass_fp8_supported,
     dispatch_w8a8_block_fp8_linear,
@@ -621,58 +622,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 and self.cutlass_fp8_supported
                 and (is_sm100_supported() or is_sm90_supported())
             ):
-                self.ab_strides1 = torch.full(
-                    (num_experts,),
-                    hidden_size,
-                    device=w13_weight.device,
-                    dtype=torch.int64,
-                )
-                self.c_strides1 = torch.full(
-                    (num_experts,),
-                    2 * intermediate_size,
-                    device=w13_weight.device,
-                    dtype=torch.int64,
-                )
-                self.ab_strides2 = torch.full(
-                    (num_experts,),
-                    intermediate_size,
-                    device=w2_weight.device,
-                    dtype=torch.int64,
-                )
-                self.c_strides2 = torch.full(
-                    (num_experts,),
-                    hidden_size,
-                    device=w2_weight.device,
-                    dtype=torch.int64,
-                )
-                self.workspace = torch.empty(
-                    90000, device=w13_weight.device, dtype=torch.uint8
-                )
-                self.a_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.b_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.out_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.a_scales_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.b_scales_ptr = torch.empty(
-                    num_experts, device=w13_weight.device, dtype=torch.int64
-                )
-                self.expert_offsets = torch.empty(
-                    num_experts + 1, device=w13_weight.device, dtype=torch.int32
-                )
-                self.problem_sizes1 = torch.empty(
-                    num_experts, 3, device=w13_weight.device, dtype=torch.int32
-                )
-                self.problem_sizes2 = torch.empty(
-                    num_experts, 3, device=w13_weight.device, dtype=torch.int32
-                )
-
+                buffers = Fp8BufferPool.get_static_buffers(w13_weight.device, num_experts, hidden_size, intermediate_size)
+                self.ab_strides1 = buffers['ab_strides1']
+                self.c_strides1 = buffers['c_strides1']
+                self.ab_strides2 = buffers['ab_strides2']
+                self.c_strides2 = buffers['c_strides2']
+                self.workspace = buffers['workspace']
+                self.a_ptr = buffers['a_ptr']
+                self.b_ptr = buffers['b_ptr']
+                self.out_ptr = buffers['out_ptr']
+                self.a_scales_ptr = buffers['a_scales_ptr']
+                self.b_scales_ptr = buffers['b_scales_ptr']
+                self.expert_offsets = buffers['expert_offsets']
+                self.problem_sizes1 = buffers['problem_sizes1']
+                self.problem_sizes2 = buffers['problem_sizes2']
+                print("memory allocated: ", torch.cuda.memory_allocated())
+                print("memory reserved: ", torch.cuda.memory_reserved())
         else:
             # Allocate 2 scales for w1 and w3 respectively.
             # They will be combined to a single scale after weight loading.
@@ -747,7 +712,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if _is_hip and _use_hip_int4:
             self.process_weights_hip_int4(layer)
             return
-
+        
         # Block quant doesn't need to process weights after loading
         if self.block_quant:
             # If ROCm, normalize the weights and scales to e4m3fnuz

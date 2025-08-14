@@ -56,6 +56,65 @@ use_vllm_cutlass_w8a8_fp8_kernel = get_bool_env_var("USE_VLLM_CUTLASS_W8A8_FP8_K
 TORCH_DEVICE_IDENTITY = None
 
 
+class Fp8BufferPool:
+    _buffers = {}
+
+    @classmethod
+    def get_static_buffers(cls, device, num_experts, hidden_size, intermediate_size):
+        key = (device, num_experts, hidden_size, intermediate_size)
+        if key not in cls._buffers:
+            print("allocating buffers!!")
+            # Allocate only once per device/config
+            buffers = {
+                'ab_strides1': torch.full(
+                    (num_experts,), hidden_size, device=device, dtype=torch.int64),
+                'c_strides1': torch.full(
+                    (num_experts,), 2 * intermediate_size, device=device, dtype=torch.int64),
+                'ab_strides2': torch.full(
+                    (num_experts,), intermediate_size, device=device, dtype=torch.int64),
+                'c_strides2': torch.full(
+                    (num_experts,), hidden_size, device=device, dtype=torch.int64),
+                'workspace': torch.empty(
+                    90000, device=device, dtype=torch.uint8),
+                'a_ptr': torch.empty(
+                    num_experts, device=device, dtype=torch.int64),
+                'b_ptr': torch.empty(
+                    num_experts, device=device, dtype=torch.int64),
+                'out_ptr': torch.empty(
+                    num_experts, device=device, dtype=torch.int64),
+                'a_scales_ptr': torch.empty(
+                    num_experts, device=device, dtype=torch.int64),
+                'b_scales_ptr': torch.empty(
+                    num_experts, device=device, dtype=torch.int64),
+                'expert_offsets': torch.empty(
+                    num_experts + 1, device=device, dtype=torch.int32),
+                'problem_sizes1': torch.empty(
+                    num_experts, 3, device=device, dtype=torch.int32),
+                'problem_sizes2': torch.empty(
+                    num_experts, 3, device=device, dtype=torch.int32),
+            }
+            cls._buffers[key] = buffers
+        return cls._buffers[key]
+    @classmethod
+    def get_dynamic_buffers(cls, device, m, n, k, topk, output_dtype, num_experts):
+        key = (device, m, n, k, topk, output_dtype, num_experts)
+        if key not in cls._buffers:
+            print("dynamic allocating buffers! key: ", key)
+            buffers = {
+                 'a_map': torch.empty((m * topk), dtype=torch.int32, device=device),
+                 'c_map': torch.empty((m * topk), dtype=torch.int32, device=device),
+                 'c1': torch.empty((m * topk, n * 2), device=device, dtype=output_dtype),
+                 'c2': torch.empty((m * topk, k), device=device, dtype=output_dtype),
+                 'a_sf_layout': torch.empty((num_experts, 5), device=device, dtype=torch.int),
+                 'w_sf_layout': torch.empty((num_experts, 5), device=device, dtype=torch.int),
+                 'intermediate': torch.empty((m * topk, n), device=device, dtype=output_dtype),
+                 'result': torch.empty((m, k), device=device, dtype=output_dtype),
+                 'rep_a_q': torch.empty((m * topk, k), device=device, dtype=torch.float8_e4m3fn),
+                 'rep_a1_scales': torch.empty((m * topk, int(k // 128)), device=device, dtype=torch.float),
+            }
+            cls._buffers[key] = buffers
+        return cls._buffers[key]
+    
 def use_rowwise_torch_scaled_mm():
     _TORCH_VERSION = torch.__version__.split("+")[0]
     try:

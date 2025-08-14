@@ -9,9 +9,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 
 from sglang.srt.layers.moe.cutlass_moe_params import CutlassMoEParams
+from sglang.srt.layers.quantization.fp8_utils import Fp8BufferPool
 from sglang.srt.layers.utils import is_sm100_supported
 from sglang.srt.utils import is_cuda
-
 _is_cuda = is_cuda()
 if _is_cuda:
     import sgl_kernel
@@ -136,9 +136,18 @@ def cutlass_fused_experts_fp8(
 
     topk = topk_ids.size(1)
     device = a.device
-
-    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    
+    buffers = Fp8BufferPool.get_dynamic_buffers(device, m, n, k, topk, out_dtype, num_experts)
+    a_map = buffers['a_map']
+    c_map = buffers['c_map']
+    c1 = buffers['c1']
+    c2 = buffers['c2']
+    a_sf_layout = buffers['a_sf_layout']
+    w_sf_layout = buffers['w_sf_layout']
+    intermediate = buffers['intermediate']
+    result = buffers['result']
+    rep_a_q = buffers['rep_a_q']
+    rep_a1_scales = buffers['rep_a1_scales']
 
     prepare_moe_input(
         topk_ids,
@@ -154,20 +163,15 @@ def cutlass_fused_experts_fp8(
 
     if is_sm100_supported():
         a_q, a1_scale = sglang_per_token_group_quant_fp8(a, 128)
-        rep_a_q = shuffle_rows(a_q, a_map, (m * topk, k))
-        rep_a1_scales = shuffle_rows(a1_scale, a_map, (m * topk, int(k / 128)))
+        shuffle_rows(a_q, a_map, rep_a_q)
+        shuffle_rows(a1_scale, a_map, rep_a1_scales)
     else:
-        rep_a = shuffle_rows(a, a_map, (m * topk, k))
+        shuffle_rows(a, a_map, rep_a)
         rep_a_q, rep_a1_scales = per_token_group_quant_fp8_hopper_moe_mn_major(
             rep_a, expert_offsets, problem_sizes1, 128
         )
         w1_scale = w1_scale.contiguous()
 
-    c1 = torch.empty((m * topk, n * 2), device=device, dtype=out_dtype)
-    c2 = torch.empty((m * topk, k), device=device, dtype=out_dtype)
-
-    a_sf_layout = torch.empty((num_experts, 5), device=device, dtype=torch.int)
-    w_sf_layout = torch.empty((num_experts, 5), device=device, dtype=torch.int)
 
     fp8_blockwise_scaled_grouped_mm(
         c1,
@@ -190,7 +194,6 @@ def cutlass_fused_experts_fp8(
         workspace,
     )
 
-    intermediate = torch.empty((m * topk, n), device=device, dtype=out_dtype)
     silu_and_mul(c1, intermediate)
 
     if is_sm100_supported():
@@ -200,7 +203,6 @@ def cutlass_fused_experts_fp8(
             intermediate, expert_offsets, problem_sizes2, 128
         )
         w2_scale = w2_scale.contiguous()
-
     fp8_blockwise_scaled_grouped_mm(
         c2,
         a_ptrs,
@@ -222,7 +224,6 @@ def cutlass_fused_experts_fp8(
         workspace,
     )
 
-    result = torch.empty((m, k), device=device, dtype=out_dtype)
     apply_shuffle_mul_sum(c2, result, c_map, topk_weights.to(out_dtype))
     return result
 
