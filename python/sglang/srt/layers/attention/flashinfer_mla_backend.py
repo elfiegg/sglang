@@ -184,6 +184,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         skip_prefill: bool = False,
         kv_indptr_buf: Optional[torch.Tensor] = None,
         q_indptr_decode_buf: Optional[torch.Tensor] = None,
+        enable_chunk_kv: bool = False,
     ):
         super().__init__()
 
@@ -191,7 +192,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         self.max_context_len = model_runner.model_config.context_len
         self.device = model_runner.device
         self.skip_prefill = skip_prefill
-        self.enable_chunk_kv = (
+        self.enable_chunk_kv = enable_chunk_kv or (
             not skip_prefill
             and global_server_args_dict["disaggregation_mode"] != "decode"
             and not global_server_args_dict["disable_chunked_prefix_cache"]
